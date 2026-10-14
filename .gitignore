@@ -26,15 +26,21 @@ venv/
 env/
 ENV/
 
-# Model weights & large binary artifacts
+# Model weights, large binary shards, and GGUF artifacts
+*.gguf
 *.safetensors
 *.bin
 *.pt
 *.pth
 *.onnx
+models/
+output_*/
+small_model/
 saved_qat_ternary_model/
 ternary_output/
 checkpoints/
+tmp_gguf/
+torchinductor_*/
 
 # IDE and OS
 .vscode/
@@ -44,7 +50,7 @@ checkpoints/
 .DS_Store
 .directory
 
-# Logs and outputs
+# Logs and scratch
 *.log
 *.pdf
 *.txt.bak

@@ -1,0 +1,135 @@
+# Calibration Dataset for DeepSeek-Coder-V2 Quantization
+# High-entropy, diverse multi-language coding and reasoning benchmarks
+
+def binary_search(arr: list[int], target: int) -> int:
+    left, right = 0, len(arr) - 1
+    while left <= right:
+        mid = (left + right) // 2
+        if arr[mid] == target:
+            return mid
+        elif arr[mid] < target:
+            left = mid + 1
+        else:
+            right = mid - 1
+    return -1
+
+import asyncio
+import aiohttp
+from typing import Dict, Any, Optional
+
+class APIClient:
+    def __init__(self, base_url: str, timeout: int = 30):
+        self.base_url = base_url.rstrip("/")
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
+
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession(timeout=self.timeout)
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+    async def get_resource(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if not self.session:
+            raise RuntimeError("Client session is not initialized. Use async with context.")
+        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        async with self.session.get(url, params=params) as resp:
+            resp.raise_for_status()
+            return await resp.json()
+
+#include <iostream>
+#include <vector>
+#include <memory>
+#include <mutex>
+#include <thread>
+
+template<typename T>
+class ThreadSafeQueue {
+private:
+    mutable std::mutex mtx_;
+    std::vector<T> data_;
+public:
+    void push(T val) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        data_.push_back(std::move(val));
+    }
+    bool pop(T& out_val) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (data_.empty()) return false;
+        out_val = std::move(data_.back());
+        data_.pop_back();
+        return true;
+    }
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return data_.empty();
+    }
+};
+
+interface UserPayload {
+    id: string;
+    username: string;
+    email: string;
+    roles: string[];
+    createdAt: Date;
+}
+
+export async function validateAndNormalizeUser(input: unknown): Promise<UserPayload> {
+    if (typeof input !== "object" || input === null) {
+        throw new TypeError("Invalid payload: must be an object");
+    }
+    const candidate = input as Record<string, unknown>;
+    if (typeof candidate.id !== "string" || typeof candidate.username !== "string") {
+        throw new Error("Missing required identity fields");
+    }
+    return {
+        id: candidate.id,
+        username: candidate.username.trim().toLowerCase(),
+        email: String(candidate.email ?? "").trim().toLowerCase(),
+        roles: Array.isArray(candidate.roles) ? candidate.roles.map(String) : ["user"],
+        createdAt: new Date(),
+    };
+}
+
+WITH monthly_sales AS (
+    SELECT 
+        o.account_id,
+        DATE_TRUNC('month', o.order_date) AS sales_month,
+        SUM(oi.quantity * oi.unit_price) AS total_revenue,
+        COUNT(DISTINCT o.id) AS order_count
+    FROM orders o
+    JOIN order_items oi ON o.id = oi.order_id
+    WHERE o.status = 'COMPLETED'
+      AND o.order_date >= NOW() - INTERVAL '12 months'
+    GROUP BY o.account_id, DATE_TRUNC('month', o.order_date)
+)
+SELECT 
+    account_id,
+    sales_month,
+    total_revenue,
+    AVG(total_revenue) OVER (
+        PARTITION BY account_id 
+        ORDER BY sales_month 
+        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+    ) AS rolling_3mo_avg
+FROM monthly_sales
+ORDER BY account_id, sales_month DESC;
+
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+pub fn parallel_sum(data: &[i64], num_threads: usize) -> i64 {
+    let chunk_size = (data.len() + num_threads - 1) / num_threads;
+    let mut handles = Vec::new();
+
+    for chunk in data.chunks(chunk_size) {
+        let chunk_vec = chunk.to_vec();
+        handles.push(thread::spawn(move || {
+            chunk_vec.into_iter().sum::<i64>()
+        }));
+    }
+
+    handles.into_iter().map(|h| h.join().unwrap()).sum()
+}
