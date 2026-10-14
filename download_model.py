@@ -38,8 +38,6 @@ def download_model(model_id=MODEL_ID, local_dir=LOCAL_DIR):
         print(f"  [✓] {shard} complete.")
 
     print(f"\n[✓] All shards downloaded successfully to {local_dir}!")
-    print("[*] Initiating automatic system shutdown as requested...")
-    os.system("shutdown -h +1 'Model download complete. System shutting down in 60 seconds.' || systemctl poweroff || sudo shutdown -h now")
 
 if __name__ == "__main__":
     model = sys.argv[1] if len(sys.argv) > 1 else MODEL_ID
