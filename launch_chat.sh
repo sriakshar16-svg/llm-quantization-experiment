@@ -1,24 +1,13 @@
 #!/bin/bash
-# Interactive Chat Terminal for BitNet DeepSeek Model
-BIN_DIR="/home/tsriakshar/.gemini/antigravity/scratch/BitNet/build/bin"
-export LD_LIBRARY_PATH="$BIN_DIR"
-
-MODEL_PATH="/home/tsriakshar/Desktop/CODEBASES/llm-quantization-experiment/deepseek_v2_lite_bitnet_q3_k_m.gguf"
+# Interactive Chat Terminal for ZeroGap-BitNet VRAM-Resident Native Inference
+cd /home/tsriakshar/Desktop/CODEBASES/llm-quantization-experiment || exit 1
 
 echo "======================================================================"
-echo "       INITIALIZING INTERACTIVE BITNET TERNARY MODEL TERMINAL          "
+echo "    INITIALIZING ZERO-GAP BITNET VRAM-RESIDENT INFERENCE ENGINE       "
 echo "======================================================================"
-echo "[*] Model Path : $MODEL_PATH"
-echo "[*] Engine     : compiled llama-cli (BitNet GGUF C++ Runtime)"
-echo "[*] Commands   : Type '/clear' to reset chat, 'Ctrl+C' or '/exit' to quit"
+echo "[*] Hardware Target  : RTX 3070 Ti (8GB VRAM) + 16GB RAM"
+echo "[*] Engine Type      : BitNet Native PyTorch/CUDA (Zero GGUF / Zero BF16)"
+echo "[*] Shards Directory : output_bitnet_deepseek_base3"
 echo "======================================================================"
 
-"$BIN_DIR/llama-cli" \
-  -m "$MODEL_PATH" \
-  -c 4096 \
-  -t 8 \
-  --temp 0.2 \
-  --repeat-penalty 1.2 \
-  --chat-template deepseek2 \
-  -sys "You are DeepSeek-Coder, an intelligent coding and technical reasoning assistant." \
-  -cnv
+python3 chat_vram.py "$@"

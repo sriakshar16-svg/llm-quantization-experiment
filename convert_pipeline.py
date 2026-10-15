@@ -108,48 +108,86 @@ def quantize_block_4bit(weight: torch.Tensor, group_size: int = 128):
     }
 
 
-def quantize_ternary_least_squares(weight: torch.Tensor, group_size: int = 128, outlier_ratio: float = 0.015, pack_mode: str = "base3"):
+def quantize_ternary_least_squares(
+    weight: torch.Tensor,
+    group_size: int = 128,
+    outlier_ratio: float = 0.015,
+    als_steps: int = 3,
+    pack_mode: str = "base3",
+    use_group_uint8_outliers: bool = True,
+):
     """
-    Ternary {-1, 0, +1} quantization for bulk MLP and MoE experts with:
-      - Closed-form analytical least-squares optimal scale: gamma* = sum(W * T) / sum(T^2)
-      - Top salient outliers preserved in FP16 (eliminates tail clipping)
-      - Base-3 packing (1.60 bits/param) or 2-bit packing (2.0 bits/param)
+    Outlier-Isolated Alternating Least-Squares (ALS) Ternary Quantization.
+    - Isolates outliers BEFORE scale calculation (eliminating scale inflation).
+    - Runs 3-step ALS coordinate descent for optimal deadzone & curvature scaling.
+    - Packs 5 ternary weights per uint8 byte (1.60 bpw).
+    - Stores outlier indices as uint8 group offsets (2.10 bpw total) or flat int32.
     """
     w_f32 = weight.float()
     shape = w_f32.shape
     flat = w_f32.reshape(-1)
     orig_numel = flat.numel()
 
-    # 1. Identify top salient outliers to preserve in full precision
-    k = max(1, int(orig_numel * outlier_ratio))
-    thresh = torch.topk(flat.abs(), k).values[-1]
-    outlier_mask = flat.abs() >= thresh
-
-    # 2. Group padding
+    # Pad to multiple of group_size first so outliers & scales share exact group alignment
     rem = orig_numel % group_size
-    pad_len = group_size - rem if rem > 0 else 0
+    pad_len = (group_size - rem) if rem > 0 else 0
     if pad_len > 0:
         flat_padded = torch.cat([flat, torch.zeros(pad_len, device=w_f32.device, dtype=w_f32.dtype)])
     else:
         flat_padded = flat
+
     grouped = flat_padded.view(-1, group_size)
+    num_groups = grouped.shape[0]
 
-    # 3. Initial ternary rounding
-    gamma_init = grouped.abs().mean(dim=-1, keepdim=True).clamp(min=1e-5)
-    ternary_int = (grouped / gamma_init).round().clamp(-1, 1)
+    if use_group_uint8_outliers:
+        # Top-k per 128-weight group (k=2 -> 2/128 = 1.56% outliers, index fits in uint8 [0..127])
+        k_group = max(1, round(group_size * outlier_ratio))
+        _, group_topk_idx = torch.topk(grouped.abs(), k=k_group, dim=-1, largest=True, sorted=False)
+        outlier_val_gpu = torch.gather(grouped, dim=-1, index=group_topk_idx)
 
-    # 4. Analytical optimal least-squares scale: gamma* = sum(W * T) / sum(T^2)
-    denom = (ternary_int ** 2).sum(dim=-1, keepdim=True).clamp(min=1.0)
-    numer = (grouped * ternary_int).sum(dim=-1, keepdim=True)
-    gamma_opt = (numer / denom).clamp(min=1e-5)
+        # Zero out outliers inside each group BEFORE computing ternary scales
+        grouped_bulk = grouped.clone()
+        grouped_bulk.scatter_(dim=-1, index=group_topk_idx, value=0.0)
 
-    # 5. Reconstruct float weight for closed-loop forward propagation
-    reconstructed_bulk = (ternary_int * gamma_opt).view(-1)[:orig_numel]
-    reconstructed = torch.where(outlier_mask, flat, reconstructed_bulk).view(shape)
+        outlier_idx_cpu = group_topk_idx.to(torch.uint8).cpu()
+        outlier_val_cpu = outlier_val_gpu.to(torch.float16).cpu()
+        outlier_format = "group_uint8"
+    else:
+        # Global top-k flat int32 indices (backward-compatible)
+        k_total = max(1, int(orig_numel * outlier_ratio))
+        _, flat_topk_idx = torch.topk(flat.abs(), k=k_total, largest=True, sorted=False)
+        flat_topk_idx, _ = torch.sort(flat_topk_idx)
+        outlier_mask = torch.zeros_like(flat_padded, dtype=torch.bool)
+        outlier_mask[flat_topk_idx] = True
+        grouped_bulk = torch.where(outlier_mask, torch.zeros_like(flat_padded), flat_padded).view(-1, group_size)
+        outlier_idx_cpu = flat_topk_idx.to(torch.int32).cpu()
+        outlier_val_cpu = flat[flat_topk_idx].to(torch.float16).cpu()
+        outlier_format = "flat_int32"
 
-    outlier_indices = outlier_mask.nonzero(as_tuple=False).squeeze(-1).to(torch.int32).cpu()
-    outlier_values = flat[outlier_mask].to(torch.float16).cpu()
+    # Initial absmean scale over non-outlier bulk weights only
+    non_zero_count = (grouped_bulk != 0).sum(dim=-1, keepdim=True).clamp(min=1.0)
+    gamma = (grouped_bulk.abs().sum(dim=-1, keepdim=True) / non_zero_count).clamp(min=1e-5)
 
+    # 3-Step Alternating Least Squares (ALS): jointly optimize T in {-1, 0, +1} and gamma*
+    for _ in range(als_steps):
+        ternary_int = (grouped_bulk / gamma).round().clamp(-1, 1)
+        denom = (ternary_int ** 2).sum(dim=-1, keepdim=True).clamp(min=1.0)
+        numer = (grouped_bulk * ternary_int).sum(dim=-1, keepdim=True)
+        gamma = (numer / denom).clamp(min=1e-5)
+
+    ternary_int = (grouped_bulk / gamma).round().clamp(-1, 1)
+
+    # Reconstruct float weight for closed-loop activation propagation
+    reconstructed_grouped = ternary_int * gamma
+    if use_group_uint8_outliers:
+        reconstructed_grouped.scatter_(dim=-1, index=group_topk_idx, src=outlier_val_gpu)
+        reconstructed = reconstructed_grouped.view(-1)[:orig_numel].view(shape)
+    else:
+        reconstructed_flat = reconstructed_grouped.view(-1)[:orig_numel]
+        reconstructed_flat[flat_topk_idx] = flat[flat_topk_idx]
+        reconstructed = reconstructed_flat.view(shape)
+
+    # Pack bulk ternary trits to Base-3 uint8 (5 weights per byte)
     t_flat = ternary_int.view(-1)[:orig_numel].to(torch.int8)
     if pack_mode == "base3":
         packed_t, orig_n = pack_ternary_base3(t_flat)
@@ -165,9 +203,10 @@ def quantize_ternary_least_squares(weight: torch.Tensor, group_size: int = 128, 
         }
 
     pack_meta.update({
-        "scales": gamma_opt.view(-1).cpu().to(torch.float16),
-        "outlier_idx": outlier_indices,
-        "outlier_val": outlier_values,
+        "outlier_format": outlier_format,
+        "scales": gamma.view(-1).cpu().to(torch.float16),
+        "outlier_idx": outlier_idx_cpu,
+        "outlier_val": outlier_val_cpu,
         "orig_shape": list(shape),
     })
 
@@ -287,10 +326,18 @@ def convert_model_out_of_core(donor_dir: str, output_dir: str, pack_mode: str = 
                     out_idx_k = f"{k[:-len('.packed_ternary')]}.outlier_idx"
                     out_val_k = f"{k[:-len('.packed_ternary')]}.outlier_val"
                     if out_idx_k in saved_dict and out_val_k in saved_dict:
-                        out_idx = saved_dict[out_idx_k].to(DEVICE, dtype=torch.int64)
+                        out_idx = saved_dict[out_idx_k].to(DEVICE)
                         out_val = saved_dict[out_val_k].to(DEVICE, dtype=torch.float32)
                         if out_idx.numel() > 0:
-                            w_rec[out_idx] = out_val
+                            if out_idx.dtype == torch.uint8 or out_idx.ndim > 1:
+                                num_groups = scales.numel()
+                                pad_len = num_groups * 128 - orig_n
+                                trits_padded = F.pad(unpacked.float(), (0, pad_len)) if pad_len > 0 else unpacked.float()
+                                g = trits_padded.view(num_groups, 128) * scales.unsqueeze(-1)
+                                g.scatter_(dim=-1, index=out_idx.long(), src=out_val)
+                                w_rec = g.view(-1)[:orig_n]
+                            else:
+                                w_rec[out_idx.long()] = out_val
                     mod_sub = base_k[:-len(".weight")] if base_k.endswith(".weight") else base_k
                     mod_shape = meta_model.model.layers[idx].get_submodule(mod_sub).weight.shape
                     reconstructed_for_forward[short] = w_rec.view(mod_shape).to(hidden_states.dtype)
