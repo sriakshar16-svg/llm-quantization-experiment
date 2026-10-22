@@ -1,4 +1,4 @@
-FROM ./deepseek_coder_v2_lite_iq2_xxs.gguf
+FROM ./qwen2.5_coder_32b_bitnet_q3_k_m.gguf
 
 TEMPLATE """{{- if .System }}<|im_start|>system
 {{ .System }}<|im_end|>
@@ -10,7 +10,7 @@ TEMPLATE """{{- if .System }}<|im_start|>system
 
 PARAMETER stop "<|im_start|>"
 PARAMETER stop "<|im_end|>"
-PARAMETER temperature 0.3
+PARAMETER temperature 0.2
 PARAMETER top_p 0.95
-PARAMETER num_ctx 4096
+PARAMETER num_ctx 2048
 PARAMETER num_gpu 99

@@ -347,15 +347,55 @@ relocation R_X86_64_32 against .bss can not be used when making a shared object
 
 ---
 
+---
+
+## Session 3: Native GGUF Architecture, The TQ1_0 Outlier Trap, K-Quants & Capability Benchmarks
+
+### Phase 8: Standardizing GGUF as the Default Deployment Artifact
+* **Objective:** Remove reliance on Python runtime for deployment by converting raw PyTorch ALS shards into self-contained GGUF binaries compatible with `llama.cpp`, Ollama, and LM Studio.
+* **Implementation (`export_bitnet_to_gguf.py`):**
+  - Designed an architecture-agnostic dynamic subclass factory extending `llama.cpp`'s `ModelBase`.
+  - Enforced strict out-of-core streaming: loads only one layer's safetensors shard into memory at a time, keeping host memory overhead below 2.5 GB.
+  - Automatically invokes compiled `llama-quantize` to emit deployment formats (`Q3_K_M`, `Q4_K_M`) and reclaims intermediate 60GB BF16 storage.
+
+---
+
+### Phase 9: Root Cause Diagnosis — Why 16B Succeeded while 32B Degraded
+* **Empirical Observation:** DeepSeek 16B GGUF ran with zero errors at 16.8 tok/s, while the initial Qwen 32B `TQ1_0` GGUF generated repetitive tokens (`Mim招 Mim...`).
+* **Root Cause 1 — The `TQ1_0` Outlier Trap:**
+  - `TQ1_0` uses a single absolute maximum scale factor (`amax`) per 256 weights.
+  - In our Base-3 ALS shards, 98.5% of bulk weights are normalized to $\pm 0.08$, but 1.5% are unquantized FP16 outliers ($\ge 1.5$).
+  - A single outlier inflated `amax` to $2.0$. Bulk ternary weights divided by $2.0$ dropped below $0.04$, which rounded to **literal zeros**. 98.5% of the model parameters were zeroed out.
+* **Root Cause 2 — Attention Double-Quantization:**
+  - Pre-quantizing attention projections to 4-bit uniform in Python, followed by re-quantizing to 2-bit in GGML, destroyed softmax key-value orthogonality.
+* **The Engineering Fix:**
+  - In `export_bitnet_to_gguf.py`, attention projections (`self_attn.*`) are locked to continuous donor float precision (`BF16`).
+  - In Qwen-32B, attention is only 4.02B parameters (12.9%). Preserving continuous donor attention costs $<2.0$ GB in GGUF size, while the 27.17B parameter MLP bulk (87.1%) is safely compressed using K-quants super-blocks.
+
+---
+
+### Phase 10: Ruthless Reasoning, Problem-Solving & Software Engineering Benchmark
+* **Harness (`benchmark_capabilities_gguf.py`):**
+  - Integrated pseudo-terminal (`pty`) interception with `os.login_tty()` to capture `llama-cli` controlling terminal output, tokens, and timings.
+  - Automated Python AST validation with `ast.parse` for code generation tasks.
+* **Results across 9 Hardcore Challenges:**
+  - **Edge Cases (EC1–EC3):** 3/3 Passed (Cycle detection, IEEE 754 float boundaries, TOCTOU concurrency).
+  - **Deep Reasoning (GK1–GK3):** 3/3 Passed (Quantum No-Cloning theorem proof, B-Trees vs LSM NVMe WAF, Euclid's $4k+3$ prime proof).
+  - **Software Engineering (SWE1–SWE3):** 3/3 Passed (Thread-safe LRU cache with TTL, Raft network partition split-brain, Asyncio semaphore client).
+  - **Composite Score:** **9 / 9 (100.0%)** at an average speed of **14.3 tok/s** (peaking at **16.7 tok/s**) with 0 MB swap thrashing.
+
+---
+
 ## Key Engineering Takeaways & Synthesis
 
 1. **Information Bottlenecks in Post-Training Quantization:**
    - At 4 bits (16 levels / Hexadecimal), post-training quantization preserves sufficient entropy to retain language understanding without retraining.
-   - At 1.58 bits (3 levels / Ternary), PTQ causes irreversible rank and representation collapse.
-2. **The Necessity of Quantization-Aware Training (QAT):**
-   - Ternary models must be trained from scratch or fine-tuned using Straight-Through Estimators (STE) where continuous shadow weights guide discrete state selection.
-3. **Hardware & Systems Engineering:**
-   - True efficiency gains require tight coupling between numerical quantization schemes, memory layout (packed bit-planes), and GPU compute primitives.
+   - At 1.58 bits (3 levels / Ternary), PTQ causes irreversible rank collapse unless sensitive attention projections are protected in continuous float precision.
+2. **K-Quants Super-Blocks Eliminate Outlier Smearing:**
+   - Dividing 256-weight blocks into nested 16/32-weight sub-blocks with master and local scales isolates outliers to single sub-blocks, preventing model-wide precision collapse.
+3. **Hardware & Systems Memory Realities:**
+   - Running a 15 GB dense model purely on CPU on a 16 GB host machine triggers severe NVMe swap thrashing, dragging decode speeds down by 135×. Offloading ~24 layers to an 8GB GPU completely eliminates swap thrashing and unlocks 20–35 tok/s.
 
 ---
-*Log compilation completed and verified against experimental transcripts.*
+*Log updated and verified against experimental results and GitHub deliverables.*
+

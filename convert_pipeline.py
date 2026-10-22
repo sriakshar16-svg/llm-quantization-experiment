@@ -230,7 +230,16 @@ def build_weight_index(donor_dir: str):
     return weight_map
 
 
-def convert_model_out_of_core(donor_dir: str, output_dir: str, pack_mode: str = "base3", max_layers: int = None, resume: bool = False):
+def convert_model_out_of_core(
+    donor_dir: str,
+    output_dir: str,
+    pack_mode: str = "base3",
+    max_layers: int = None,
+    resume: bool = False,
+    export_gguf: bool = True,
+    gguf_quant: str = "Q4_K_M",
+    clean_bf16_gguf: bool = True,
+):
     os.makedirs(output_dir, exist_ok=True)
     start_time = time.time()
 
@@ -240,6 +249,7 @@ def convert_model_out_of_core(donor_dir: str, output_dir: str, pack_mode: str = 
     print(f"[*] Donor Model Directory : {donor_dir}")
     print(f"[*] Target Output Shards   : {output_dir}")
     print(f"[*] Quantization Packaging : {pack_mode.upper()} (1.6 bpb Base-3 or 2-bit)")
+    print(f"[*] Default Export Package : {'GGUF (' + gguf_quant + ')' if export_gguf else 'Raw Shards Only'}")
     print(f"[*] Active Compute Device  : {DEVICE}")
 
     # 1. Load config and tokenizer
@@ -508,18 +518,51 @@ def convert_model_out_of_core(donor_dir: str, output_dir: str, pack_mode: str = 
 
     elapsed = time.time() - start_time
     print("=" * 70)
-    print(f"[✓] CONVERSION COMPLETED SUCCESSFULLY IN {elapsed:.1f} SECONDS ({elapsed/60:.2f} MINS)")
-    print(f"[*] Artifacts stored in: {output_dir}")
+    print(f"[✓] BITNET SHARDS QUANTIZED SUCCESSFULLY IN {elapsed:.1f} SECS ({elapsed/60:.2f} MINS)")
+    print(f"[*] Shards stored in: {output_dir}")
     print("=" * 70)
+
+    # 7. Automatic GGUF Packaging (DEFAULT PIPELINE DELIVERABLE)
+    if export_gguf:
+        print("\n" + "=" * 70)
+        print("   AUTOMATIC GGUF PACKAGING (DEFAULT PIPELINE DELIVERABLE)")
+        print("=" * 70)
+        try:
+            from export_bitnet_to_gguf import export_model_to_gguf
+            final_gguf = export_model_to_gguf(
+                donor_dir=donor_dir,
+                bitnet_dir=output_dir,
+                output_dir=output_dir,
+                quant_type=gguf_quant,
+                clean_bf16=clean_bf16_gguf,
+            )
+            print(f"[✓] Default Deployable GGUF: {final_gguf}")
+        except Exception as e:
+            print(f"[!] Warning: GGUF packaging encountered an issue: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Universal Out-of-Core Model Converter")
+    parser = argparse.ArgumentParser(description="Universal Out-of-Core Model Converter (GGUF Default)")
     parser.add_argument("donor_dir", type=str, help="Path to donor HF model directory")
-    parser.add_argument("output_dir", type=str, help="Path to save converted shards")
+    parser.add_argument("output_dir", type=str, help="Path to save converted shards and GGUF")
     parser.add_argument("--mode", type=str, default="base3", choices=["base3", "hybrid"], help="Packing format")
     parser.add_argument("--max-layers", type=int, default=None, help="Optionally limit number of layers to process")
     parser.add_argument("--resume", action="store_true", help="Resume conversion from existing layer checkpoints")
+    parser.add_argument("--gguf", action="store_true", default=True, help="Automatically package to GGUF (DEFAULT)")
+    parser.add_argument("--no-gguf", action="store_false", dest="gguf", help="Disable automatic GGUF packaging (save shards only)")
+    parser.add_argument("--gguf-quant", type=str, default="Q4_K_M", help="Deployment GGUF quant format (default: Q4_K_M; options: Q2_K, Q3_K_M, TQ1_0, BF16)")
+    parser.add_argument("--keep-bf16-gguf", action="store_true", help="Keep temporary uncompressed BF16 GGUF")
     args = parser.parse_args()
 
-    convert_model_out_of_core(args.donor_dir, args.output_dir, pack_mode=args.mode, max_layers=args.max_layers, resume=args.resume)
+    convert_model_out_of_core(
+        args.donor_dir,
+        args.output_dir,
+        pack_mode=args.mode,
+        max_layers=args.max_layers,
+        resume=args.resume,
+        export_gguf=args.gguf,
+        gguf_quant=args.gguf_quant,
+        clean_bf16_gguf=not args.keep_bf16_gguf,
+    )

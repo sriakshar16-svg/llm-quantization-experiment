@@ -54,3 +54,8 @@ torchinductor_*/
 *.log
 *.pdf
 *.txt.bak
+
+# Scratch and temporary test files
+scratch_ollama/
+test_out.txt
+

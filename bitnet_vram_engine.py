@@ -81,15 +81,25 @@ class BitNetTernaryLinear(nn.Module):
         self.orig_numel = int(orig_numel)
         self.group_size = group_size
 
-        # Register compressed buffers in VRAM
-        self.register_buffer("packed_ternary", packed_ternary.to(device, dtype=torch.uint8), persistent=False)
-        self.register_buffer("scales", scales.to(device, dtype=torch.float16), persistent=False)
-        self.register_buffer("outlier_idx", outlier_idx.to(device), persistent=False)
-        self.register_buffer("outlier_val", outlier_val.to(device, dtype=torch.float16), persistent=False)
-        if bias is not None:
-            self.register_buffer("bias", bias.to(device, dtype=torch.float16), persistent=False)
+        # Register compressed buffers in VRAM or CPU (unpinned to prevent host RAM locking)
+        if device == "cpu":
+            self.register_buffer("packed_ternary", packed_ternary.cpu(), persistent=False)
+            self.register_buffer("scales", scales.to(dtype=torch.float16).cpu(), persistent=False)
+            self.register_buffer("outlier_idx", outlier_idx.cpu(), persistent=False)
+            self.register_buffer("outlier_val", outlier_val.to(dtype=torch.float16).cpu(), persistent=False)
+            if bias is not None:
+                self.register_buffer("bias", bias.to(dtype=torch.float16).cpu(), persistent=False)
+            else:
+                self.bias = None
         else:
-            self.bias = None
+            self.register_buffer("packed_ternary", packed_ternary.to(device, dtype=torch.uint8), persistent=False)
+            self.register_buffer("scales", scales.to(device, dtype=torch.float16), persistent=False)
+            self.register_buffer("outlier_idx", outlier_idx.to(device), persistent=False)
+            self.register_buffer("outlier_val", outlier_val.to(device, dtype=torch.float16), persistent=False)
+            if bias is not None:
+                self.register_buffer("bias", bias.to(device, dtype=torch.float16), persistent=False)
+            else:
+                self.bias = None
 
     @classmethod
     def get_lut(cls, device: torch.device) -> torch.Tensor:
@@ -104,13 +114,30 @@ class BitNetTernaryLinear(nn.Module):
             return torch.empty((*x.shape[:-1], self.out_features), dtype=x.dtype, device=x.device)
 
         orig_dtype = x.dtype
-        lut = self.get_lut(self.packed_ternary.device)
+        target_device = x.device
+
+        # On-demand VRAM streaming if buffer is resident in CPU RAM
+        if self.packed_ternary.device != target_device:
+            p_ternary = self.packed_ternary.to(target_device, non_blocking=True)
+            scales = self.scales.to(target_device, non_blocking=True)
+            outlier_idx = self.outlier_idx.to(target_device, non_blocking=True)
+            outlier_val = self.outlier_val.to(target_device, non_blocking=True)
+            bias = self.bias.to(target_device, non_blocking=True) if self.bias is not None else None
+            lut = self.get_lut(target_device)
+        else:
+            p_ternary = self.packed_ternary
+            scales = self.scales
+            outlier_idx = self.outlier_idx
+            outlier_val = self.outlier_val
+            bias = self.bias
+            lut = self.get_lut(self.packed_ternary.device)
 
         # 1. Fast L1-cached LUT gather: uint8 -> 5x int8 {-1, 0, +1}
-        trits = lut[self.packed_ternary.long()].reshape(-1)[:self.orig_numel]
+        # Use int32 indexing to cut index allocation by 50% vs int64
+        trits = lut[p_ternary.int()].reshape(-1)[:self.orig_numel]
 
         # 2. Multiply by group scales (grouped view avoids repeat_interleave memory allocation)
-        num_groups = self.scales.numel()
+        num_groups = scales.numel()
         pad_len = num_groups * self.group_size - self.orig_numel
         if pad_len > 0:
             trits_padded = F.pad(trits, (0, pad_len))
@@ -118,23 +145,25 @@ class BitNetTernaryLinear(nn.Module):
             trits_padded = trits
 
         w_grouped = trits_padded.view(num_groups, self.group_size).to(torch.float16)
-        w_grouped.mul_(self.scales.unsqueeze(-1))
+        del trits, trits_padded
+        w_grouped.mul_(scales.unsqueeze(-1))
 
         # 3. Scatter salient FP16 outliers back in-place
-        if self.outlier_idx.numel() > 0:
-            if self.outlier_idx.dtype == torch.uint8 or self.outlier_idx.ndim > 1:
+        if outlier_idx.numel() > 0:
+            if outlier_idx.dtype == torch.uint8 or outlier_idx.ndim > 1:
                 # Per-group uint8 outlier indices: shape (num_groups, k)
-                w_grouped.scatter_(dim=-1, index=self.outlier_idx.long(), src=self.outlier_val)
+                w_grouped.scatter_(dim=-1, index=outlier_idx.long(), src=outlier_val)
                 w_flat = w_grouped.view(-1)[:self.orig_numel]
             else:
                 # Flat int32 outlier indices (backward compatible with existing shards)
                 w_flat = w_grouped.view(-1)[:self.orig_numel]
-                w_flat.index_copy_(0, self.outlier_idx.long(), self.outlier_val)
+                w_flat.index_copy_(0, outlier_idx.long(), outlier_val)
         else:
             w_flat = w_grouped.view(-1)[:self.orig_numel]
 
         w = w_flat.view(self.out_features, self.in_features)
-        out = F.linear(x.to(torch.float16), w, self.bias)
+        out = F.linear(x.to(torch.float16), w, bias)
+        del w, w_flat, w_grouped
         return out.to(orig_dtype)
 
 
@@ -161,12 +190,21 @@ class BitNet4BitLinear(nn.Module):
         self.group_size = group_size
         self.orig_numel = orig_numel if orig_numel is not None else (in_features * out_features)
 
-        self.register_buffer("q_weight", q_weight.to(device, dtype=torch.uint8), persistent=False)
-        self.register_buffer("scales", scales.to(device, dtype=torch.float16), persistent=False)
-        if bias is not None:
-            self.register_buffer("bias", bias.to(device, dtype=torch.float16), persistent=False)
+        # Register compressed buffers in VRAM or CPU (unpinned to prevent host RAM locking)
+        if device == "cpu":
+            self.register_buffer("q_weight", q_weight.cpu(), persistent=False)
+            self.register_buffer("scales", scales.to(dtype=torch.float16).cpu(), persistent=False)
+            if bias is not None:
+                self.register_buffer("bias", bias.to(dtype=torch.float16).cpu(), persistent=False)
+            else:
+                self.bias = None
         else:
-            self.bias = None
+            self.register_buffer("q_weight", q_weight.to(device, dtype=torch.uint8), persistent=False)
+            self.register_buffer("scales", scales.to(device, dtype=torch.float16), persistent=False)
+            if bias is not None:
+                self.register_buffer("bias", bias.to(device, dtype=torch.float16), persistent=False)
+            else:
+                self.bias = None
 
     @classmethod
     def get_lut(cls, device: torch.device) -> torch.Tensor:
@@ -180,13 +218,25 @@ class BitNet4BitLinear(nn.Module):
             return torch.empty((*x.shape[:-1], self.out_features), dtype=x.dtype, device=x.device)
 
         orig_dtype = x.dtype
-        lut = self.get_lut(self.q_weight.device)
+        target_device = x.device
+
+        # On-demand VRAM streaming if buffer is resident in CPU RAM
+        if self.q_weight.device != target_device:
+            q_weight = self.q_weight.to(target_device, non_blocking=True)
+            scales = self.scales.to(target_device, non_blocking=True)
+            bias = self.bias.to(target_device, non_blocking=True) if self.bias is not None else None
+            lut = self.get_lut(target_device)
+        else:
+            q_weight = self.q_weight
+            scales = self.scales
+            bias = self.bias
+            lut = self.get_lut(self.q_weight.device)
 
         # 1. Fast L1-cached LUT gather: uint8 -> 2x int8 in [-8, 7]
-        unpacked = lut[self.q_weight.long()].reshape(-1)[:self.orig_numel]
+        unpacked = lut[q_weight.int()].reshape(-1)[:self.orig_numel]
 
         # 2. Multiply by group scales
-        num_groups = self.scales.numel()
+        num_groups = scales.numel()
         pad_len = num_groups * self.group_size - self.orig_numel
         if pad_len > 0:
             unpacked_padded = F.pad(unpacked, (0, pad_len))
@@ -194,25 +244,39 @@ class BitNet4BitLinear(nn.Module):
             unpacked_padded = unpacked
 
         w_grouped = unpacked_padded.view(num_groups, self.group_size).to(torch.float16)
-        w_grouped.mul_(self.scales.unsqueeze(-1))
+        del unpacked, unpacked_padded
+        w_grouped.mul_(scales.unsqueeze(-1))
         w = w_grouped.view(-1)[:self.orig_numel].view(self.out_features, self.in_features)
 
-        out = F.linear(x.to(torch.float16), w, self.bias)
+        out = F.linear(x.to(torch.float16), w, bias)
+        del w, w_grouped
         return out.to(orig_dtype)
 
 
 class Int8WeightOnlyLinear(nn.Module):
     """Compact INT8 weight-only linear layer for lm_head and fallback projections."""
 
-    def __init__(self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, device: str = "cuda"):
+    def __init__(
+        self,
+        weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        device: str = "cuda",
+        prequant_weight: Optional[torch.Tensor] = None,
+        prequant_scale: Optional[torch.Tensor] = None,
+    ):
         super().__init__()
-        self.out_features, self.in_features = weight.shape
-        w_f32 = weight.float()
-        scale = (w_f32.abs().amax(dim=-1, keepdim=True) / 127.0).clamp(min=1e-5)
-        w_int8 = (w_f32 / scale).round().clamp(-127, 127).to(torch.int8)
+        if prequant_weight is not None:
+            self.out_features, self.in_features = prequant_weight.shape
+            self.register_buffer("weight_int8", prequant_weight.to(device, dtype=torch.int8), persistent=False)
+            self.register_buffer("scale", prequant_scale.to(device, dtype=torch.float16), persistent=False)
+        else:
+            self.out_features, self.in_features = weight.shape
+            w_f32 = weight.float()
+            scale = (w_f32.abs().amax(dim=-1, keepdim=True) / 127.0).clamp(min=1e-5)
+            w_int8 = (w_f32 / scale).round().clamp(-127, 127).to(torch.int8)
+            self.register_buffer("weight_int8", w_int8.to(device), persistent=False)
+            self.register_buffer("scale", scale.to(device, dtype=torch.float16), persistent=False)
 
-        self.register_buffer("weight_int8", w_int8.to(device), persistent=False)
-        self.register_buffer("scale", scale.to(device, dtype=torch.float16), persistent=False)
         if bias is not None:
             self.register_buffer("bias", bias.to(device, dtype=torch.float16), persistent=False)
         else:
@@ -222,8 +286,29 @@ class Int8WeightOnlyLinear(nn.Module):
         if x.numel() == 0:
             return torch.empty((*x.shape[:-1], self.out_features), dtype=x.dtype, device=x.device)
         orig_dtype = x.dtype
-        w = self.weight_int8.to(torch.float16) * self.scale
-        return F.linear(x.to(torch.float16), w, self.bias).to(orig_dtype)
+        target_device = x.device
+        x_f16 = x.to(device=target_device, dtype=torch.float16)
+
+        # When out_features is large (e.g. 152k vocab for Qwen2), chunking into 16k slices
+        # uses only ~80 MB of temporary FP16 buffer instead of allocating 1.45 GiB all at once!
+        chunk_size = 16384
+        if self.out_features > chunk_size:
+            out_chunks = []
+            for start in range(0, self.out_features, chunk_size):
+                end = min(start + chunk_size, self.out_features)
+                w_c = self.weight_int8[start:end].to(target_device, non_blocking=True).to(torch.float16)
+                s_c = self.scale[start:end].to(target_device, non_blocking=True)
+                w_f16 = w_c * s_c
+                b_c = self.bias[start:end].to(target_device) if self.bias is not None else None
+                out_chunks.append(F.linear(x_f16, w_f16, b_c))
+            out = torch.cat(out_chunks, dim=-1)
+        else:
+            w_int8 = self.weight_int8.to(target_device, non_blocking=True)
+            scale = self.scale.to(target_device, non_blocking=True)
+            bias = self.bias.to(target_device, non_blocking=True) if self.bias is not None else None
+            w = w_int8.to(torch.float16) * scale
+            out = F.linear(x_f16, w, bias)
+        return out.to(orig_dtype)
 
 
 def _set_submodule(root: nn.Module, target_path: str, new_module: nn.Module):
@@ -246,11 +331,13 @@ def load_bitnet_vram_model(
     donor_dir: str,
     bitnet_dir: str,
     device: str = "cuda",
-    offload_embed_to_cpu: bool = False,
+    offload_embed_to_cpu: bool = True,
+    gpu_layers: Optional[int] = 40,
 ):
     """
-    Builds the DeepSeek-V2 model skeleton in 0 MB RAM (meta device) and streams
-    Base-3 ternary shards + 4-bit attention + anchors directly into compressed GPU VRAM (~4.8-5.2 GB total).
+    Builds the model skeleton in 0 MB RAM (meta device) and streams
+    Base-3 ternary shards + 4-bit attention + anchors directly into compressed GPU VRAM.
+    Supports hybrid GPU/CPU layer allocation via `gpu_layers` for models exceeding VRAM capacity.
     """
     donor_path = Path(donor_dir)
     bitnet_path = Path(bitnet_dir)
@@ -260,6 +347,8 @@ def load_bitnet_vram_model(
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(config, trust_remote_code=True, torch_dtype=torch.float16)
     model.eval()
+    # Force model.device property to report compute device (e.g. cuda:0)
+    type(model).device = property(lambda self: torch.device(device))
 
     # Index donor safetensors for fallback tensors (norm weights, biases, unquantized heads)
     index_file = donor_path / "model.safetensors.index.json"
@@ -281,32 +370,54 @@ def load_bitnet_vram_model(
     # 1. Load Anchors
     print("[2/4] Loading anchors (Embedding + INT8 LM Head + Final Norm)...")
     anchors_file = bitnet_path / "anchors.safetensors"
-    anchors = load_file(str(anchors_file)) if anchors_file.exists() else {}
+    lm_int8_file = bitnet_path / "lm_head_int8.safetensors"
 
-    embed_w = anchors.get("model.embed_tokens.weight", get_donor_tensor("model.embed_tokens.weight"))
+    if anchors_file.exists():
+        with safe_open(str(anchors_file), framework="pt", device="cpu") as f:
+            embed_w = f.get_tensor("model.embed_tokens.weight")
+            norm_w = f.get_tensor("model.norm.weight").to(device, dtype=torch.float16)
+            if not lm_int8_file.exists():
+                lm_head_w = f.get_tensor("lm_head.weight")
+            else:
+                lm_head_w = None
+    else:
+        embed_w = get_donor_tensor("model.embed_tokens.weight")
+        norm_w = get_donor_tensor("model.norm.weight").to(device, dtype=torch.float16)
+        lm_head_w = get_donor_tensor("lm_head.weight")
+
+    model.model.norm.weight = nn.Parameter(norm_w, requires_grad=False)
+
     if offload_embed_to_cpu:
-        embed_pinned = embed_w.to(torch.float16).pin_memory()
-        embed_mod = nn.Embedding(embed_pinned.shape[0], embed_pinned.shape[1], _weight=embed_pinned)
+        # Keep embedding table in CPU RAM as Float16 WITHOUT pin_memory (prevents locking 3.6 GB host RAM)
+        embed_cpu = embed_w.to(torch.float16)
+        del embed_w
+        embed_mod = nn.Embedding(embed_cpu.shape[0], embed_cpu.shape[1], _weight=embed_cpu)
         embed_mod.register_forward_hook(lambda mod, inp, out: out.to(device))
         embed_mod.register_forward_pre_hook(lambda mod, inp: (inp[0].cpu(),))
         _set_submodule(model, "model.embed_tokens", embed_mod)
     else:
         embed_gpu = embed_w.to(device=device, dtype=torch.float16)
+        del embed_w
         _set_submodule(model, "model.embed_tokens", nn.Embedding(embed_gpu.shape[0], embed_gpu.shape[1], _weight=embed_gpu))
 
-    norm_w = anchors.get("model.norm.weight", get_donor_tensor("model.norm.weight")).to(device, dtype=torch.float16)
-    model.model.norm.weight = nn.Parameter(norm_w, requires_grad=False)
-
-    lm_head_w = anchors.get("lm_head.weight", get_donor_tensor("lm_head.weight"))
-    _set_submodule(model, "lm_head", Int8WeightOnlyLinear(lm_head_w, device=device))
-    del anchors, lm_head_w, embed_w
+    if lm_int8_file.exists():
+        with safe_open(str(lm_int8_file), framework="pt", device="cpu") as f:
+            w_int8 = f.get_tensor("weight_int8")
+            s_scale = f.get_tensor("scale")
+        _set_submodule(model, "lm_head", Int8WeightOnlyLinear(prequant_weight=w_int8, prequant_scale=s_scale, device=device))
+        del w_int8, s_scale
+    else:
+        _set_submodule(model, "lm_head", Int8WeightOnlyLinear(lm_head_w, device=device))
+        del lm_head_w
     gc.collect()
 
-    # 2. Stream Layers 0..N into GPU VRAM
+    # 2. Stream Layers 0..N into GPU VRAM / CPU RAM
     num_layers = getattr(config, "num_hidden_layers", 27)
-    print(f"[3/4] Streaming {num_layers} compressed layers into GPU VRAM...")
+    effective_gpu_layers = num_layers if gpu_layers is None else min(gpu_layers, num_layers)
+    print(f"[3/4] Allocating {num_layers} compressed layers ({effective_gpu_layers} VRAM-resident, {num_layers - effective_gpu_layers} dynamic streaming)...")
 
     for layer_idx in range(num_layers):
+        layer_dev = device if (gpu_layers is None or layer_idx < gpu_layers) else "cpu"
         layer_file = bitnet_path / f"layer_{layer_idx}.safetensors"
         layer_dict = load_file(str(layer_file)) if layer_file.exists() else {}
 
@@ -338,12 +449,12 @@ def load_bitnet_vram_model(
                     outlier_val=layer_dict[f"{full_key}.outlier_val"],
                     orig_numel=orig_n,
                     bias=bias_tensor,
-                    device=device,
+                    device=layer_dev,
                 )
                 _set_submodule(model, mod_path, new_mod)
 
             elif qweight_key in layer_dict:
-                # 2. 4-Bit Attention Projection (Trap #2 Fixed)
+                # 2. 4-Bit Attention Projection
                 target_mod = _get_submodule(model, mod_path)
                 in_f, out_f = target_mod.in_features, target_mod.out_features
                 new_mod = BitNet4BitLinear(
@@ -352,12 +463,12 @@ def load_bitnet_vram_model(
                     q_weight=layer_dict[qweight_key],
                     scales=layer_dict[f"{full_key}.scales"],
                     bias=bias_tensor,
-                    device=device,
+                    device=layer_dev,
                 )
                 _set_submodule(model, mod_path, new_mod)
 
             elif "mlp.gate" in mod_path or "norm" in mod_path:
-                # 3. MoE Router Gate & LayerNorms: preserve in FP16
+                # 3. MoE Router Gate & LayerNorms: preserve in FP16 on compute device
                 w = layer_dict.get(full_key, get_donor_tensor(full_key)).to(device, dtype=torch.float16)
                 target_mod = _get_submodule(model, mod_path)
                 target_mod.weight = nn.Parameter(w, requires_grad=False)
@@ -367,17 +478,32 @@ def load_bitnet_vram_model(
             else:
                 # 4. Attention/Linear fallback to INT8 weight-only
                 w = layer_dict.get(full_key, get_donor_tensor(full_key))
-                new_mod = Int8WeightOnlyLinear(w, bias=bias_tensor, device=device)
+                new_mod = Int8WeightOnlyLinear(w, bias=bias_tensor, device=layer_dev)
                 _set_submodule(model, mod_path, new_mod)
 
         del layer_dict
         gc.collect()
-        if device == "cuda" and (layer_idx % 5 == 0 or layer_idx == num_layers - 1):
+        if device == "cuda" and (layer_idx % 8 == 0 or layer_idx == num_layers - 1):
             vram_gb = torch.cuda.memory_allocated() / (1024 ** 3)
             print(f"  -> Loaded Layer {layer_idx:02d}/{num_layers - 1:02d} | Active GPU VRAM: {vram_gb:.2f} GB")
 
     # 3. Materialize Rotary Position Embeddings (RoPE / YaRN) on GPU
     print("[4/4] Materializing rotary position embeddings (RoPE/YaRN) on GPU...")
+    if hasattr(model.model, "rotary_emb"):
+        rot_cls = type(model.model.rotary_emb)
+        try:
+            model.model.rotary_emb = rot_cls(config=config, device=device)
+        except Exception:
+            try:
+                model.model.rotary_emb = rot_cls(config, device=device)
+            except Exception:
+                model.model.rotary_emb.to_empty(device=device)
+
+        orig_rot_fwd = model.model.rotary_emb.forward
+        def safe_rot_fwd(x, position_ids, **kwargs):
+            return orig_rot_fwd(x, position_ids.to(x.device), **kwargs)
+        model.model.rotary_emb.forward = safe_rot_fwd
+
     for name, mod in model.named_modules():
         if "rotary_emb" in name:
             if hasattr(mod, "dim") and hasattr(mod, "base"):

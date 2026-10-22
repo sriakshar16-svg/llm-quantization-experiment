@@ -29,6 +29,7 @@ def parse_args():
     parser.add_argument("--bench", action="store_true", help="Run automated benchmark prompt and exit")
     parser.add_argument("--bench_prompt", type=str, default="Write a concise Python function to implement binary search.", help="Benchmark prompt")
     parser.add_argument("--offload_embed", action="store_true", help="Offload embedding table to CPU RAM")
+    parser.add_argument("--gpu_layers", type=int, default=None, help="Number of layers to place directly in VRAM (remaining layers stream from CPU RAM)")
     return parser.parse_args()
 
 
@@ -167,6 +168,7 @@ def main():
         bitnet_dir=args.bitnet_dir,
         device="cuda",
         offload_embed_to_cpu=args.offload_embed,
+        gpu_layers=args.gpu_layers,
     )
 
     if args.bench:

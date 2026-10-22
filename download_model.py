@@ -1,45 +1,79 @@
+#!/usr/bin/env python3
 """
-Model Download Helper with Progress Bar (download_model.py)
-=========================================================
-Downloads safetensors shards for a HuggingFace model repo into a local folder
-with a real-time progress bar.
+download_model.py
+==================
+High-speed, resumable model downloader using huggingface_hub and hf_transfer.
+Downloads full model repos (configs, tokenizers, safetensors shards) while ignoring
+redundant legacy formats (*.bin, *.pt, *.msgpack).
 """
 
+import argparse
 import os
 import sys
-import json
-import urllib.request
-from tqdm import tqdm
-from huggingface_hub import hf_hub_download
+import time
 
-MODEL_ID = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
-LOCAL_DIR = "./models/DeepSeek-Coder-V2-Lite-Instruct"
+# Enable Rust-based multi-threaded download accelerator
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-def download_model(model_id=MODEL_ID, local_dir=LOCAL_DIR):
+from huggingface_hub import snapshot_download
+
+
+MODELS = {
+    "32b": {
+        "repo_id": "Qwen/Qwen2.5-Coder-32B-Instruct",
+        "local_dir": "./models/Qwen2.5-Coder-32B-Instruct",
+    },
+    "70b": {
+        "repo_id": "Qwen/Qwen2.5-72B-Instruct",
+        "local_dir": "./models/Qwen2.5-72B-Instruct",
+    },
+}
+
+
+def download_repo(repo_id: str, local_dir: str):
+    print("=" * 70)
+    print(f"[*] Starting High-Speed Download: {repo_id}")
+    print(f"[*] Destination: {os.path.abspath(local_dir)}")
+    print(f"[*] Accelerator: hf-transfer (Rust multi-threaded streaming)")
+    print("=" * 70)
+
     os.makedirs(local_dir, exist_ok=True)
-    print(f"[*] Downloading {model_id} to {local_dir}...")
-    
-    # Download index json
-    index_file = hf_hub_download(repo_id=model_id, filename="model.safetensors.index.json", local_dir=local_dir)
-    with open(index_file) as f:
-        data = json.load(f)
-        
-    shards = sorted(list(set(data["weight_map"].values())))
-    print(f"[✓] Found {len(shards)} weight shards to download.\n")
-    
-    for idx, shard in enumerate(shards, 1):
-        target_path = os.path.join(local_dir, shard)
-        if os.path.exists(target_path):
-            print(f"  [{idx}/{len(shards)}] {shard} already downloaded. Skipping.")
-            continue
-            
-        print(f"  [{idx}/{len(shards)}] Downloading {shard}...")
-        hf_hub_download(repo_id=model_id, filename=shard, local_dir=local_dir)
-        print(f"  [✓] {shard} complete.")
+    t0 = time.time()
 
-    print(f"\n[✓] All shards downloaded successfully to {local_dir}!")
+    try:
+        path = snapshot_download(
+            repo_id=repo_id,
+            local_dir=local_dir,
+            ignore_patterns=["*.bin", "*.pt", "*.msgpack", "*.h5", "*.ot", "original/*"],
+            max_workers=8,
+        )
+        elapsed = time.time() - t0
+        print(f"\n[✓] Successfully downloaded {repo_id} in {elapsed:.1f}s -> {path}")
+    except Exception as e:
+        print(f"\n[!] Error during download of {repo_id}: {e}")
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description="High-Speed HuggingFace Model Downloader")
+    parser.add_argument("--model", type=str, choices=["32b", "70b", "both"], default="32b", help="Model to download")
+    parser.add_argument("--repo_id", type=str, default=None, help="Custom HuggingFace repo ID")
+    parser.add_argument("--local_dir", type=str, default=None, help="Custom destination directory")
+    args = parser.parse_args()
+
+    if args.repo_id:
+        dest = args.local_dir or f"./models/{args.repo_id.split('/')[-1]}"
+        download_repo(args.repo_id, dest)
+        return
+
+    if args.model in ("32b", "both"):
+        m = MODELS["32b"]
+        download_repo(m["repo_id"], m["local_dir"])
+
+    if args.model in ("70b", "both"):
+        m = MODELS["70b"]
+        download_repo(m["repo_id"], m["local_dir"])
+
 
 if __name__ == "__main__":
-    model = sys.argv[1] if len(sys.argv) > 1 else MODEL_ID
-    target = sys.argv[2] if len(sys.argv) > 2 else LOCAL_DIR
-    download_model(model, target)
+    main()
