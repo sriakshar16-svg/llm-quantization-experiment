@@ -237,7 +237,7 @@ def convert_model_out_of_core(
     max_layers: int = None,
     resume: bool = False,
     export_gguf: bool = True,
-    gguf_quant: str = "Q4_K_M",
+    gguf_quant: str = "Q3_K_M",
     clean_bf16_gguf: bool = True,
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -552,7 +552,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true", help="Resume conversion from existing layer checkpoints")
     parser.add_argument("--gguf", action="store_true", default=True, help="Automatically package to GGUF (DEFAULT)")
     parser.add_argument("--no-gguf", action="store_false", dest="gguf", help="Disable automatic GGUF packaging (save shards only)")
-    parser.add_argument("--gguf-quant", type=str, default="Q4_K_M", help="Deployment GGUF quant format (default: Q4_K_M; options: Q2_K, Q3_K_M, TQ1_0, BF16)")
+    parser.add_argument("--gguf-quant", type=str, default="Q3_K_M", help="Deployment GGUF quant format (default: Q3_K_M; options: Q3_K_M, Q4_K_M, Q2_K, TQ1_0, BF16)")
     parser.add_argument("--keep-bf16-gguf", action="store_true", help="Keep temporary uncompressed BF16 GGUF")
     args = parser.parse_args()
 

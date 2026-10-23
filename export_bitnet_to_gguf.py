@@ -229,7 +229,7 @@ def export_model_to_gguf(
     donor_dir: str | Path,
     bitnet_dir: str | Path,
     output_dir: str | Path,
-    quant_type: str = "Q4_K_M",
+    quant_type: str = "Q3_K_M",
     clean_bf16: bool = True,
     threads: int = 16,
 ) -> Path:
@@ -317,7 +317,7 @@ if __name__ == "__main__":
     parser.add_argument("donor_dir", type=str, help="Path to donor HF model directory")
     parser.add_argument("bitnet_dir", type=str, help="Path to BitNet safetensors shards directory")
     parser.add_argument("--out-dir", type=str, default="./", help="Directory to save GGUF output")
-    parser.add_argument("--quant", type=str, default="Q4_K_M", help="Deployment quantization type (e.g. Q4_K_M, Q2_K, TQ1_0, BF16)")
+    parser.add_argument("--quant", type=str, default="Q3_K_M", help="Deployment quantization type (default: Q3_K_M; options: Q3_K_M, Q4_K_M, Q2_K, TQ1_0, BF16)")
     parser.add_argument("--keep-bf16", action="store_true", help="Keep temporary BF16 GGUF container")
     parser.add_argument("--threads", type=int, default=16, help="Threads for llama-quantize")
     args = parser.parse_args()
