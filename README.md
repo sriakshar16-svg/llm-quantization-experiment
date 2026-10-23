@@ -6,6 +6,7 @@
 [![Hardware Target](https://img.shields.io/badge/Hardware-RTX%203070%20Ti%20(8GB)-green.svg)](https://www.nvidia.com)
 [![GGUF Deployment Standard](https://img.shields.io/badge/Deploy-GGUF%20Default-purple.svg)](https://github.com/ggerganov/llama.cpp)
 [![Intelligence Retention](https://img.shields.io/badge/Retention-93.8%25%20Cosine%20Sim-brightgreen.svg)](benchmark_capabilities_results.json)
+[![Codebase Dump](https://img.shields.io/badge/Dump-repo__dump.txt-orange.svg)](repo_dump.txt)
 
 An end-to-end framework for **extreme 1.58-bit ternary ($\{-1, 0, +1\}$) distillation, outlier-isolated coordinate descent, and automated high-speed GGUF packaging for large MoE and dense LLM architectures** on consumer hardware.
 
@@ -134,7 +135,7 @@ ollama run bitnet32b
 │   ├── benchmark_throughput_comparison.png
 │   ├── retention_fidelity_chart.png
 │   └── memory_swap_envelope.png
-├── export_bitnet_to_gguf.py            # Streamed out-of-core GGUF exporter with protected attention
+├── export_bitnet_to_gguf.py            # Streamed out-of-core GGUF exporter (Q3_K_M default)
 ├── convert_pipeline.py                 # Automated quantization pipeline (defaults to GGUF packaging)
 ├── launch_chat.sh                      # High-speed native terminal chat runner
 ├── Modelfile                           # Ready-to-deploy Ollama GPU offload configuration
@@ -143,5 +144,20 @@ ollama run bitnet32b
 ├── benchmark_capabilities_results.json # Full benchmark scores, timings, and generated code
 ├── evaluate_retention.py               # Out-of-core cosine similarity and SQNR fidelity auditor
 ├── bitnet_vram_engine.py               # Standalone PyTorch out-of-core layer streaming engine
-└── README.md                           # Documentation and research report
+├── GEMINI.md                           # Strict mathematical & architectural quantization invariants
+├── AI_Development_Log.md               # Detailed chronological development log & post-mortems
+├── repo_dump.txt                       # Consolidated plain-text dump of all code, configs & scripts
+└── README.md                           # Documentation, findings, and research report
 ```
+
+---
+
+## 📦 Consolidated Plain-Text Codebase (`repo_dump.txt`)
+
+For convenient offline analysis, auditing, and single-file LLM ingestion, the entire codebase—including all conversion scripts, benchmarking suites, verification logic, and configuration files—is compiled into [`repo_dump.txt`](repo_dump.txt):
+
+```bash
+# View or search the complete consolidated repository dump
+cat repo_dump.txt | grep -E "^# FILE:"
+```
+

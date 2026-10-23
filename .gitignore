@@ -58,5 +58,3 @@ torchinductor_*/
 # Scratch and temporary test files
 scratch_ollama/
 test_out.txt
-
-repo_dump.txt
