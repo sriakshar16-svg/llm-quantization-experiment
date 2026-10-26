@@ -231,6 +231,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="./deepseek_v2_lite_bitnet_q3_k_m.gguf")
+    parser.add_argument("--output", type=str, default="./benchmark_capabilities_results.json")
     args = parser.parse_args()
 
     model_path = args.model
@@ -281,9 +282,9 @@ def main():
         "results": results,
     }
 
-    with open(OUTPUT_JSON, "w") as f:
+    with open(args.output, "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"[✓] Complete results written to {OUTPUT_JSON}")
+    print(f"[✓] Complete results written to {args.output}")
 
 
 if __name__ == "__main__":

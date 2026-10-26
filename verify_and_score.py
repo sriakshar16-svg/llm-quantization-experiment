@@ -11,7 +11,12 @@ import json
 import re
 import ast
 
-with open("benchmark_capabilities_results.json") as f:
+import sys
+
+input_file = sys.argv[1] if len(sys.argv) > 1 else "benchmark_capabilities_results.json"
+output_file = sys.argv[2] if len(sys.argv) > 2 else input_file
+
+with open(input_file) as f:
     data = json.load(f)
 
 def clean_response_text(full_text, prompt):
@@ -128,7 +133,7 @@ data["pass_rate_pct"] = round(pass_rate, 1)
 data["passed_tests"] = f"{passed_count}/{total}"
 data["results"] = updated_results
 
-with open("benchmark_capabilities_results.json", "w") as f:
+with open(output_file, "w") as f:
     json.dump(data, f, indent=2)
 
 print("=" * 80)

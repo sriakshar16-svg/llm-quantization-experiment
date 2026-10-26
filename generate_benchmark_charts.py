@@ -75,8 +75,8 @@ def create_throughput_chart():
     # Data Points
     # (Model name, Prompt Proc Speed, Token Gen Speed)
     data = [
-        ("DeepSeek 16B\n(MoE Q3_K_M)", 33.31, 16.15, "#10B981", "#34D399"),
-        ("Qwen 32B CPU\n(Dense Q3_K_M)", 1.55, 0.12, "#EF4444", "#F87171"),
+        ("DeepSeek 16B\n(MoE Q3_K_M)", 43.58, 19.04, "#10B981", "#34D399"),
+        ("Qwen 32B CPU\n(Dense Q3_K_M)", 3.60, 0.20, "#EF4444", "#F87171"),
         ("Qwen 32B GPU Offload\n(24 Layers VRAM)", 52.4, 24.8, "#3B82F6", "#60A5FA"),
     ]
 

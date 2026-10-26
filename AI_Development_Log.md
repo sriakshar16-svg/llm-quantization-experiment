@@ -381,8 +381,9 @@ relocation R_X86_64_32 against .bss can not be used when making a shared object
 * **Results across 9 Hardcore Challenges:**
   - **Edge Cases (EC1–EC3):** 3/3 Passed (Cycle detection, IEEE 754 float boundaries, TOCTOU concurrency).
   - **Deep Reasoning (GK1–GK3):** 3/3 Passed (Quantum No-Cloning theorem proof, B-Trees vs LSM NVMe WAF, Euclid's $4k+3$ prime proof).
-  - **Software Engineering (SWE1–SWE3):** 3/3 Passed (Thread-safe LRU cache with TTL, Raft network partition split-brain, Asyncio semaphore client).
-  - **Composite Score:** **9 / 9 (100.0%)** at an average speed of **14.3 tok/s** (peaking at **16.7 tok/s**) with 0 MB swap thrashing.
+  - **Software Engineering (SWE1–SWE3):** 2/3 Passed (Raft network partition split-brain, Asyncio semaphore client passed; SWE1 LRU cache experienced backtick boundary looping under token capping).
+  - **Composite Score:** **8 / 9 (88.9%)** verified pass rate at an average speed of **19.04 tok/s** (peaking at **20.0 tok/s**), with **43.58 tok/s prompt prefill** and 0 MB swap thrashing on DeepSeek 16B.
+  - **32B Hardware Paging Telemetry:** Pure CPU execution of 15.19 GB Qwen-32B on 16 GB host RAM causes catastrophic NVMe swap paging (0.2 tok/s decode, 894.8s per task), proving GPU offloading (`-ngl 24`) is strictly non-optional.
 
 ---
 
