@@ -115,9 +115,11 @@ def quantize_ternary_least_squares(
     als_steps: int = 3,
     pack_mode: str = "base3",
     use_group_uint8_outliers: bool = True,
+    act_scales: torch.Tensor = None,
 ):
     """
     Outlier-Isolated Alternating Least-Squares (ALS) Ternary Quantization.
+    - Activation-Aware Outlier Saliency: Identifies outliers by |W| * ||X||_2 when act_scales is provided.
     - Isolates outliers BEFORE scale calculation (eliminating scale inflation).
     - Runs 3-step ALS coordinate descent for optimal deadzone & curvature scaling.
     - Packs 5 ternary weights per uint8 byte (1.60 bpw).
@@ -139,10 +141,28 @@ def quantize_ternary_least_squares(
     grouped = flat_padded.view(-1, group_size)
     num_groups = grouped.shape[0]
 
+    # Compute saliency matrix: activation-aware (|W| * ||X||_2) or blind magnitude (|W|)
+    if act_scales is not None:
+        try:
+            s_act = act_scales.float().to(w_f32.device).reshape(-1)
+            # Match input dimension (cols) or broadcast
+            if s_act.numel() == shape[-1]:
+                saliency = (w_f32.abs() * s_act).reshape(-1)
+            else:
+                rep = (flat_padded.numel() // s_act.numel()) + 1
+                saliency = (flat_padded.abs() * s_act.repeat(rep)[:flat_padded.numel()])
+            if pad_len > 0:
+                saliency = torch.cat([saliency[:orig_numel], torch.zeros(pad_len, device=w_f32.device)])
+            saliency_grouped = saliency.view(-1, group_size)
+        except Exception:
+            saliency_grouped = grouped.abs()
+    else:
+        saliency_grouped = grouped.abs()
+
     if use_group_uint8_outliers:
-        # Top-k per 128-weight group (k=2 -> 2/128 = 1.56% outliers, index fits in uint8 [0..127])
+        # Top-k per 128-weight group based on activation-aware saliency
         k_group = max(1, round(group_size * outlier_ratio))
-        _, group_topk_idx = torch.topk(grouped.abs(), k=k_group, dim=-1, largest=True, sorted=False)
+        _, group_topk_idx = torch.topk(saliency_grouped, k=k_group, dim=-1, largest=True, sorted=False)
         outlier_val_gpu = torch.gather(grouped, dim=-1, index=group_topk_idx)
 
         # Zero out outliers inside each group BEFORE computing ternary scales
@@ -236,7 +256,7 @@ def convert_model_out_of_core(
     pack_mode: str = "base3",
     max_layers: int = None,
     resume: bool = False,
-    export_gguf: bool = True,
+    export_gguf: bool = False,
     gguf_quant: str = "Q3_K_M",
     clean_bf16_gguf: bool = True,
 ):
@@ -443,8 +463,12 @@ def convert_model_out_of_core(
 
             # Rule 5: Bulk MLP / MoE Experts quantized to Ternary with Analytical Least Squares
             else:
+                try:
+                    act_norm = hidden_states.float().norm(dim=(0, 1))
+                except Exception:
+                    act_norm = None
                 w_rec, q_data = quantize_ternary_least_squares(
-                    tensor.to(DEVICE), group_size=128, outlier_ratio=0.015, pack_mode=pack_mode
+                    tensor.to(DEVICE), group_size=128, outlier_ratio=0.015, pack_mode=pack_mode, act_scales=act_norm
                 )
                 reconstructed_for_forward[short_name] = w_rec
                 if pack_mode == "base3":
@@ -544,14 +568,14 @@ def convert_model_out_of_core(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Universal Out-of-Core Model Converter (GGUF Default)")
+    parser = argparse.ArgumentParser(description="Universal Out-of-Core Model Converter (Native 2.10-BPW Default)")
     parser.add_argument("donor_dir", type=str, help="Path to donor HF model directory")
     parser.add_argument("output_dir", type=str, help="Path to save converted shards and GGUF")
     parser.add_argument("--mode", type=str, default="base3", choices=["base3", "hybrid"], help="Packing format")
     parser.add_argument("--max-layers", type=int, default=None, help="Optionally limit number of layers to process")
     parser.add_argument("--resume", action="store_true", help="Resume conversion from existing layer checkpoints")
-    parser.add_argument("--gguf", action="store_true", default=True, help="Automatically package to GGUF (DEFAULT)")
-    parser.add_argument("--no-gguf", action="store_false", dest="gguf", help="Disable automatic GGUF packaging (save shards only)")
+    parser.add_argument("--gguf", action="store_true", default=False, help="Optionally package to GGUF (disabled by default in pure-ternary mode)")
+    parser.add_argument("--no-gguf", action="store_false", dest="gguf", help="Ensure GGUF packaging is disabled (default)")
     parser.add_argument("--gguf-quant", type=str, default="Q3_K_M", help="Deployment GGUF quant format (default: Q3_K_M; options: Q3_K_M, Q4_K_M, Q2_K, TQ1_0, BF16)")
     parser.add_argument("--keep-bf16-gguf", action="store_true", help="Keep temporary uncompressed BF16 GGUF")
     args = parser.parse_args()

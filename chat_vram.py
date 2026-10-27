@@ -15,8 +15,9 @@ from transformers import AutoTokenizer
 
 from bitnet_vram_engine import load_bitnet_vram_model
 
-DEFAULT_DONOR = "/home/tsriakshar/Desktop/CODEBASES/llm-quantization-experiment/models/DeepSeek-Coder-V2-Lite-Instruct"
-DEFAULT_BITNET = "/home/tsriakshar/Desktop/CODEBASES/llm-quantization-experiment/output_bitnet_deepseek_base3"
+ROOT_DIR = Path(__file__).resolve().parent
+DEFAULT_DONOR = str(ROOT_DIR / "models/DeepSeek-Coder-V2-Lite-Instruct")
+DEFAULT_BITNET = str(ROOT_DIR / "output_bitnet_deepseek_base3")
 
 
 def parse_args():

@@ -178,9 +178,9 @@ def run_benchmark_suite(gpu_layers=40):
             )
             torch.cuda.synchronize()
             t_total = time.perf_counter() - t_start
-            ttft_ms = (t_total / max(output_ids.shape[1] - prompt_len, 1)) * 1000.0
-
-        new_tokens = output_ids.shape[1] - prompt_len
+            new_tokens = output_ids.shape[1] - prompt_len
+            tpot_ms = (t_total / max(new_tokens, 1)) * 1000.0
+            ttft_ms = tpot_ms  # Estimated when not instrumenting first token callback
         tps = new_tokens / max(t_total, 1e-5)
         peak_vram = torch.cuda.max_memory_allocated() / (1024 ** 3)
         current_vram = torch.cuda.memory_allocated() / (1024 ** 3)

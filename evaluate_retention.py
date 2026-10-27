@@ -106,10 +106,18 @@ def evaluate_layer_fidelity(donor_dir: str, converted_dir: str, layer_idx: int, 
                     out_idx_k = f"{full_k}.outlier_idx"
                     out_val_k = f"{full_k}.outlier_val"
                     if out_idx_k in saved_dict and out_val_k in saved_dict:
-                        out_idx = saved_dict[out_idx_k].to(DEVICE, dtype=torch.int64)
+                        out_idx = saved_dict[out_idx_k].to(DEVICE)
                         out_val = saved_dict[out_val_k].to(DEVICE, dtype=torch.float32)
                         if out_idx.numel() > 0:
-                            w_rec[out_idx] = out_val
+                            if out_idx.dtype == torch.uint8 or out_idx.ndim > 1:
+                                num_groups = scales.numel()
+                                pad_len = num_groups * 128 - orig_n
+                                trits_pad = F.pad(unpacked.float(), (0, pad_len)) if pad_len > 0 else unpacked.float()
+                                w_g = trits_pad.view(num_groups, 128) * scales.unsqueeze(-1)
+                                w_g.scatter_(dim=-1, index=out_idx.long(), src=out_val)
+                                w_rec = w_g.view(-1)[:orig_n]
+                            else:
+                                w_rec[out_idx.long()] = out_val
                     rec_flat = w_rec
 
                 elif k_4bit in saved_dict:

@@ -112,8 +112,8 @@ def upgrade_shards(donor_dir: str, bitnet_dir: str, start_layer: int = 0, end_la
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fast In-Place Shard Upgrader")
-    parser.add_argument("--donor_dir", type=str, default="/home/tsriakshar/Desktop/CODEBASES/llm-quantization-experiment/models/DeepSeek-Coder-V2-Lite-Instruct")
-    parser.add_argument("--bitnet_dir", type=str, default="/home/tsriakshar/Desktop/CODEBASES/llm-quantization-experiment/output_bitnet_deepseek_base3")
+    parser.add_argument("--donor_dir", type=str, default="./models/DeepSeek-Coder-V2-Lite-Instruct")
+    parser.add_argument("--bitnet_dir", type=str, default="./output_bitnet_deepseek_base3")
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=27)
     args = parser.parse_args()

@@ -25,6 +25,137 @@ from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM
 
 
+
+try:
+    import triton
+    import triton.language as tl
+    HAS_TRITON = True
+except (ImportError, ModuleNotFoundError):
+    HAS_TRITON = False
+
+
+if HAS_TRITON:
+    @triton.jit
+    def _triton_base3_gemv_kernel(
+        x_ptr,
+        packed_ptr,
+        scales_ptr,
+        outlier_idx_ptr,
+        outlier_val_ptr,
+        out_ptr,
+        bias_ptr,
+        N,
+        K,
+        num_groups_per_row,
+        k_outliers: tl.constexpr,
+        HAS_BIAS: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,  # 128
+    ):
+        row_idx = tl.program_id(0)
+        if row_idx >= N:
+            return
+
+        acc = 0.0
+        k_lane = tl.arange(0, BLOCK_SIZE)
+
+        for g in range(num_groups_per_row):
+            k_start = g * BLOCK_SIZE
+            scale = tl.load(scales_ptr + (row_idx * num_groups_per_row + g))
+            x_vals = tl.load(x_ptr + k_start + k_lane)
+
+            flat_j = row_idx * K + k_start + k_lane
+            byte_idx = flat_j // 5
+            rem = flat_j % 5
+            b = tl.load(packed_ptr + byte_idx).to(tl.int32)
+
+            div_val = tl.where(
+                rem == 0,
+                1,
+                tl.where(
+                    rem == 1,
+                    3,
+                    tl.where(
+                        rem == 2,
+                        9,
+                        tl.where(rem == 3, 27, 81),
+                    ),
+                ),
+            )
+            trits = (((b // div_val) % 3) - 1).to(tl.float32)
+            group_dot = tl.sum(trits * x_vals) * scale
+
+            # Sparse outlier correction in registers
+            if k_outliers > 0:
+                out_base = (row_idx * num_groups_per_row + g) * k_outliers
+                for ko in range(k_outliers):
+                    o_idx = tl.load(outlier_idx_ptr + out_base + ko).to(tl.int32)
+                    o_val = tl.load(outlier_val_ptr + out_base + ko).to(tl.float32)
+                    flat_o = row_idx * K + k_start + o_idx
+                    b_o = tl.load(packed_ptr + (flat_o // 5)).to(tl.int32)
+                    rem_o = flat_o % 5
+                    div_o = 1
+                    if rem_o == 1:
+                        div_o = 3
+                    elif rem_o == 2:
+                        div_o = 9
+                    elif rem_o == 3:
+                        div_o = 27
+                    elif rem_o == 4:
+                        div_o = 81
+                    t_o = (((b_o // div_o) % 3) - 1).to(tl.float32)
+                    x_o = tl.load(x_ptr + k_start + o_idx).to(tl.float32)
+                    group_dot += (o_val - t_o * scale) * x_o
+
+            acc += group_dot
+
+        if HAS_BIAS:
+            acc += tl.load(bias_ptr + row_idx).to(tl.float32)
+
+        tl.store(out_ptr + row_idx, acc.to(tl.float16))
+
+
+def _triton_base3_gemv(
+    x: torch.Tensor,
+    packed_ternary: torch.Tensor,
+    scales: torch.Tensor,
+    outlier_idx: torch.Tensor,
+    outlier_val: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    out_features: int,
+    in_features: int,
+    group_size: int = 128,
+    orig_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    x_2d = x.view(-1, in_features).to(torch.float16)
+    batch_tokens = x_2d.shape[0]
+    out = torch.empty((batch_tokens, out_features), dtype=torch.float16, device=x.device)
+
+    num_groups_per_row = in_features // group_size
+    k_outliers = outlier_idx.shape[-1] if (outlier_idx.numel() > 0 and outlier_idx.ndim > 1) else 0
+    has_bias = bias is not None
+
+    grid = (out_features,)
+
+    for i in range(batch_tokens):
+        _triton_base3_gemv_kernel[grid](
+            x_2d[i],
+            packed_ternary,
+            scales,
+            outlier_idx,
+            outlier_val,
+            out[i],
+            bias if has_bias else x_2d[i],
+            N=out_features,
+            K=in_features,
+            num_groups_per_row=num_groups_per_row,
+            k_outliers=k_outliers,
+            HAS_BIAS=has_bias,
+            BLOCK_SIZE=group_size,
+        )
+
+    return out.view(*x.shape[:-1], out_features).to(orig_dtype)
+
+
 _BASE3_LUT_CACHE: Dict[str, torch.Tensor] = {}
 _4BIT_LUT_CACHE: Dict[str, torch.Tensor] = {}
 
@@ -132,38 +263,45 @@ class BitNetTernaryLinear(nn.Module):
             bias = self.bias
             lut = self.get_lut(self.packed_ternary.device)
 
-        # 1. Fast L1-cached LUT gather: uint8 -> 5x int8 {-1, 0, +1}
-        # Use int32 indexing to cut index allocation by 50% vs int64
-        trits = lut[p_ternary.int()].reshape(-1)[:self.orig_numel]
+        # 1. Fused Triton GEMV Kernel: zero FP16 matrix allocation in VRAM
+        if HAS_TRITON and target_device.type == "cuda" and p_ternary.is_cuda:
+            flat_tokens = x.numel() // self.in_features
+            if flat_tokens <= 4:
+                return _triton_base3_gemv(
+                    x=x,
+                    packed_ternary=p_ternary,
+                    scales=scales,
+                    outlier_idx=outlier_idx,
+                    outlier_val=outlier_val,
+                    bias=bias,
+                    out_features=self.out_features,
+                    in_features=self.in_features,
+                    group_size=self.group_size,
+                    orig_dtype=orig_dtype,
+                )
 
-        # 2. Multiply by group scales (grouped view avoids repeat_interleave memory allocation)
+        # 2. Optimized PyTorch Path (Prefill / Non-CUDA Fallback)
+        trits = lut[p_ternary.long()].reshape(-1)[:self.orig_numel]
+
         num_groups = scales.numel()
         pad_len = num_groups * self.group_size - self.orig_numel
         if pad_len > 0:
-            trits_padded = F.pad(trits, (0, pad_len))
-        else:
-            trits_padded = trits
+            trits = F.pad(trits, (0, pad_len))
 
-        w_grouped = trits_padded.view(num_groups, self.group_size).to(torch.float16)
-        del trits, trits_padded
+        w_grouped = trits.view(num_groups, self.group_size).to(torch.float16)
+        del trits
         w_grouped.mul_(scales.unsqueeze(-1))
 
-        # 3. Scatter salient FP16 outliers back in-place
         if outlier_idx.numel() > 0:
             if outlier_idx.dtype == torch.uint8 or outlier_idx.ndim > 1:
-                # Per-group uint8 outlier indices: shape (num_groups, k)
                 w_grouped.scatter_(dim=-1, index=outlier_idx.long(), src=outlier_val)
-                w_flat = w_grouped.view(-1)[:self.orig_numel]
             else:
-                # Flat int32 outlier indices (backward compatible with existing shards)
                 w_flat = w_grouped.view(-1)[:self.orig_numel]
                 w_flat.index_copy_(0, outlier_idx.long(), outlier_val)
-        else:
-            w_flat = w_grouped.view(-1)[:self.orig_numel]
 
-        w = w_flat.view(self.out_features, self.in_features)
+        w = w_grouped.view(-1)[:self.orig_numel].view(self.out_features, self.in_features)
         out = F.linear(x.to(torch.float16), w, bias)
-        del w, w_flat, w_grouped
+        del w, w_grouped
         return out.to(orig_dtype)
 
 
